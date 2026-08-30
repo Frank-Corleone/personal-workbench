@@ -36,6 +36,11 @@ const BLOCK_LBL = { work: '工作', noon: '中午', evening: '晚上', day: '全
 let S = null;
 let INSTALL_EVT = null; /* PWA 安装事件 */
 const GH = { token: '', owner: '' };
+let DIRTY = false;        /* 本机有未推送修改 */
+let PUSHING = false;      /* 正在推送 */
+let CHECKING = false;     /* 正在检查云端 */
+let CONFLICT_SHA = null;  /* 云端与本机均有修改时的云端 sha */
+let PUSH_TIMER = null, CHECK_TIMER = null;
 const U = {
   route: 'dashboard', todoTab: 'work', dailyDate: '',
   noteFilter: '', noteSearch: '', searchResults: [],
@@ -44,7 +49,12 @@ const U = {
 };
 
 /* ---------- 持久化 ---------- */
-function save() { S.updatedAt = nowIso(); localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
+function save() {
+  S.updatedAt = nowIso();
+  localStorage.setItem(STORE_KEY, JSON.stringify(S));
+  DIRTY = true;
+  scheduleAutoPush();
+}
 function saveSoon() { clearTimeout(save._t); save._t = setTimeout(save, 400); }
 
 function load() {
@@ -124,23 +134,85 @@ async function verifyToken(token) {
   if (!res.ok) throw new Error('令牌无效（HTTP ' + res.status + '）');
   return (await res.json()).login;
 }
-async function cloudPush(silent) {
+async function cloudPush(opts) {
+  const silent = opts && opts.silent;
+  const force = opts && opts.force;
   await ghEnsureRepo();
-  await ghPutFile(DATA_PATH, JSON.stringify(S, null, 2), '工作台数据备份 ' + nowIso());
+  let sha = null;
+  try { sha = (await ghApi('GET', `/repos/${GH.owner}/${DATA_REPO}/contents/${DATA_PATH}?ref=main`)).sha; }
+  catch (e) { if (e.status !== 404) throw e; }
+  /* 云端比本机已知版本新，且本机有修改 → 冲突，需人工选择 */
+  if (sha && sha !== S.syncedSha && DIRTY && S.syncedSha && !force) {
+    CONFLICT_SHA = sha;
+    if (!silent) render();
+    return 'conflict';
+  }
+  const res = await ghApi('PUT', `/repos/${GH.owner}/${DATA_REPO}/contents/${DATA_PATH}`,
+    { message: '工作台数据同步 ' + nowIso(), content: b64encode(JSON.stringify(S, null, 2)), sha: sha || undefined });
+  S.syncedSha = (res.content && res.content.sha) || sha;
   S.syncedAt = nowIso();
   save();
+  DIRTY = false;
+  CONFLICT_SHA = null;
   if (!silent) { render(); toast('☁️ 已推送到 GitHub（' + DATA_REPO + '）'); }
+  return 'ok';
 }
 async function cloudPull(opts) {
   const silent = opts && opts.silent;
-  const text = await ghGetFile(DATA_PATH);
+  const meta = await ghApi('GET', `/repos/${GH.owner}/${DATA_REPO}/contents/${DATA_PATH}?ref=main`);
+  const text = meta.content && meta.encoding === 'base64' ? b64decode(meta.content.replace(/\s/g, '')) : meta;
   const data = migrate(JSON.parse(text));
   if (!data.todos || !data.analysis) throw new Error('云端数据格式不正确');
   if (!silent && !confirm('将用云端数据覆盖本机当前数据，确定？')) return false;
   S = data;
-  save(); applyTheme(S.settings.theme || 'light'); render();
+  S.syncedSha = meta.sha;
+  S.syncedAt = nowIso();
+  save();
+  DIRTY = false;
+  CONFLICT_SHA = null;
+  applyTheme(S.settings.theme || 'light'); render();
   if (!silent) toast('☁️ 已从 GitHub 恢复数据');
   return true;
+}
+
+/* ---------- 自动同步引擎 ---------- */
+function scheduleAutoPush() {
+  if (!DIRTY || !GH.token || !isAuthed() || S.settings.autoSync === false || CONFLICT_SHA) return;
+  clearTimeout(PUSH_TIMER);
+  PUSH_TIMER = setTimeout(autoPushNow, 5000);
+}
+async function autoPushNow() {
+  if (PUSHING || !DIRTY || !GH.token || !isAuthed() || S.settings.autoSync === false || CONFLICT_SHA) return;
+  PUSHING = true;
+  try {
+    const r = await cloudPush({ silent: true });
+    if (r === 'conflict') { render(); toast('⚠️ 云端与本机均有修改，请到总览选择保留哪一边'); }
+  } catch (e) { /* 静默失败，等待下次触发重试 */ }
+  finally { PUSHING = false; }
+}
+async function checkRemote(manual) {
+  if (!GH.token || !isAuthed() || PUSHING || CHECKING) return;
+  CHECKING = true;
+  try {
+    const meta = await ghApi('GET', `/repos/${GH.owner}/${DATA_REPO}/contents/${DATA_PATH}?ref=main`);
+    if (meta.sha === S.syncedSha) { if (manual) toast('☁️ 云端与本机已同步'); return; }
+    if (DIRTY) {
+      CONFLICT_SHA = meta.sha;
+      if (U.route === 'dashboard' || manual) render();
+      toast('⚠️ 云端与本机均有修改，请到总览选择保留哪一边');
+      return;
+    }
+    if (await cloudPull({ silent: true })) toast('☁️ 已自动同步云端更新');
+  } catch (e) {
+    if (manual) toast('检查云端更新失败：' + e.message);
+  } finally { CHECKING = false; }
+}
+async function conflictResolvePush() {
+  if (!confirm('将用本机数据覆盖云端（其他设备未同步的修改会丢失），确定？')) return;
+  try {
+    await cloudPush({ force: true, silent: true });
+    render(); toast('☁️ 已用本机数据覆盖云端');
+  } catch (e) { toast('推送失败：' + e.message); }
 }
 
 /* ---------- 登录（访问令牌 + 云端加盐哈希口令，双重门禁） ---------- */
@@ -226,7 +298,7 @@ async function submitInit(u, p1, p2) {
   const cfg = { u, salt, hash: await sha256Hex(salt + ':' + p1), createdAt: nowIso() };
   await ghPutFile(AUTH_PATH, JSON.stringify(cfg, null, 2), '初始化登录凭据');
   localStorage.setItem(AUTHCACHE_KEY, JSON.stringify(cfg));
-  try { await cloudPush(true); } catch (e) { /* 数据上传失败不阻塞进入 */ }
+  try { await cloudPush({ silent: true }); } catch (e) { /* 数据上传失败不阻塞进入 */ }
   sessionStorage.setItem(SESSION_KEY, '1');
   U.hadLocalData = true;
   enterApp();
@@ -278,6 +350,9 @@ function enterApp() {
   if (!U.dailyDate) U.dailyDate = todayKey();
   render();
   startClock();
+  /* 自动同步：进入时检查云端，之后定时 + 聚焦时检查 */
+  if (!CHECK_TIMER) CHECK_TIMER = setInterval(() => checkRemote(), 5 * 60 * 1000);
+  setTimeout(() => checkRemote(), 800);
 }
 function doLogout() { sessionStorage.removeItem(SESSION_KEY); localStorage.removeItem(REMEMBER_KEY); location.reload(); }
 
@@ -472,6 +547,15 @@ function renderDashboard() {
     return { k, wd: d.getDay(), pct: tot ? Math.round(dn / tot * 100) : 0, has: tot > 0 };
   });
   return `
+  ${CONFLICT_SHA ? `
+  <div class="card" style="border-left:4px solid var(--warn)">
+    <h3>⚠️ 云端与本机都有修改 <span class="hint">自动同步已暂停，选择保留哪一边后恢复</span></h3>
+    <p style="font-size:12.5px;color:var(--muted);margin-bottom:10px">另一台设备推送了新数据，而本机也有未推送的修改。两份都完整保留在 GitHub 历史里，选错的那个仍可从仓库历史找回。</p>
+    <div class="tool-row" style="margin-top:2px">
+      <button class="btn btn-sm" data-act="conflict-pull">⬇ 用云端覆盖本机</button>
+      <button class="btn btn-primary btn-sm" data-act="conflict-push">⬆ 用本机覆盖云端</button>
+    </div>
+  </div>` : ''}
   <div class="banner">
     <div><div class="hi">${greet}，${esc(authUser() || '朋友')} 👋</div>
     <div class="date">${fmtCNDate(tk)} · ${isWeekendKey(tk) ? '周末' : '工作日'}</div></div>
@@ -784,17 +868,26 @@ function buildReport() {
   wn.forEach(n => L.push(`  [${n.createdAt.slice(5, 10)}] ${n.text.length > 60 ? n.text.slice(0, 60) + '…' : n.text}`));
   return L.join('\n');
 }
+function syncStatusText() {
+  if (!GH.token) return '未配置令牌，无法云同步';
+  if (CONFLICT_SHA) return '⚠️ 云端与本机均有修改，请到「总览」选择保留哪一边';
+  if (DIRTY) return '有未推送的修改（自动同步将处理）';
+  if (S.syncedAt) return '已同步 · ' + S.syncedAt;
+  return '待同步';
+}
 function renderTools() {
-  const kb = (new Blob([JSON.stringify(S)]).size / 1024).toFixed(1);
-  return `
+  const kb = (new Blob([JSON.stringify(S)]).size / 1024).toFixed(1);  return `
   <div class="page-head"><h2>🧰 工具箱</h2><p>数据备份、周报生成、密码管理等实用功能</p></div>
   <div class="tool-grid">
     <div class="card">
       <h3>☁️ GitHub 云同步 <span class="hint">${GH.token ? '令牌已配置 ✓' : '未配置令牌'}</span></h3>
-      <p style="font-size:12.5px;color:var(--muted)">数据仓库：<b>${esc(GH.owner || '?')}/${DATA_REPO}</b>（私人，公开代码中不含数据）${S.syncedAt ? '<br>上次同步：' + esc(S.syncedAt) : ''}<br>「推送」把本机全部数据提交到私人仓库；「恢复」用云端数据覆盖本机。换设备登录后点一次恢复即可接续进度。</p>
+      <p style="font-size:12.5px;color:var(--muted)">数据仓库：<b>${esc(GH.owner || '?')}/${DATA_REPO}</b>（私人，公开代码中不含数据）<br>
+      同步状态：${esc(syncStatusText())}</p>
+      <label class="remember" style="margin:2px 0 10px"><input type="checkbox" data-act="toggle-autosync" ${S.settings.autoSync === false ? '' : 'checked'}> 自动同步（修改后约 5 秒自动推送；打开 / 切回应用时自动检查云端更新）</label>
       <div class="tool-row">
-        <button class="btn btn-primary btn-sm" data-act="cloud-push">⬆ 推送到 GitHub</button>
-        <button class="btn btn-sm" data-act="cloud-pull">⬇ 从 GitHub 恢复</button>
+        <button class="btn btn-primary btn-sm" data-act="cloud-push">⬆ 立即推送</button>
+        <button class="btn btn-sm" data-act="cloud-pull">⬇ 从云端恢复</button>
+        <button class="btn btn-sm" data-act="sync-check">🔄 检查云端更新</button>
       </div>
       <div class="danger-zone">
         <button class="btn btn-sm" data-act="forget-token">🔑 移除本机访问令牌（退出云同步）</button>
@@ -1059,8 +1152,15 @@ function onClick(e) {
       else toast('当前浏览器不支持一键安装，请用浏览器菜单中的「添加到主屏幕」');
       break;
     /* 云同步与登录辅助 */
-    case 'cloud-push': cloudPush().catch(e => toast('推送失败：' + e.message)); break;
+    case 'cloud-push':
+      cloudPush()
+        .then(r => { if (r === 'conflict') { render(); toast('⚠️ 云端与本机均有修改，请到总览选择保留哪一边'); } })
+        .catch(e => toast('推送失败：' + e.message));
+      break;
     case 'cloud-pull': cloudPull().catch(e => toast('恢复失败：' + e.message)); break;
+    case 'conflict-pull': cloudPull().catch(e => toast('恢复失败：' + e.message)); break;
+    case 'conflict-push': conflictResolvePush(); break;
+    case 'sync-check': checkRemote(true); break;
     case 'forget-token':
       if (confirm('将移除本机保存的访问令牌与凭据缓存（云端数据不受影响），确定？')) {
         localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(AUTHCACHE_KEY);
@@ -1204,6 +1304,7 @@ function onChange(e) {
     if (act === 'toggle-item') { const f = findItem(t.dataset.id); if (f && f.item) { toggleItem(f.item); save(); render(); } return; }
     if (act === 'toggle-plan') { const f = findPlanItem(t.dataset.id); if (f) { f.item.done = t.checked; f.item.doneAt = t.checked ? nowIso() : null; save(); render(); } return; }
     if (act === 'toggle-detail') { const f = findItem(t.dataset.id); if (f && f.item) { f.item.done = t.checked; save(); render(); } return; }
+    if (act === 'toggle-autosync') { S.settings.autoSync = t.checked; save(); render(); toast(t.checked ? '✅ 已开启自动同步' : '已关闭自动同步（可手动推送/恢复）'); return; }
     return;
   }
   if (t.id === 'import-file') { doImportFile(t.files && t.files[0]); return; }
@@ -1277,7 +1378,13 @@ function bindEvents() {
     const r = (location.hash || '').replace(/^#\//, '');
     if (ROUTES[r] && r !== U.route) { U.route = r; render(); }
   });
-  window.addEventListener('beforeunload', () => { clearTimeout(save._t); save(); });
+  window.addEventListener('beforeunload', () => { clearTimeout(save._t); save(); if (DIRTY) autoPushNow(); });
+  /* 自动同步：切回应用/窗口聚焦时检查云端更新；切到后台时冲刷未推送修改 */
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { if (DIRTY) autoPushNow(); }
+    else checkRemote();
+  });
+  window.addEventListener('focus', () => checkRemote());
   document.addEventListener('submit', async e => {
     if (e.target.id !== 'login-form') return;
     e.preventDefault();
