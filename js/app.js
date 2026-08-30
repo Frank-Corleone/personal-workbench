@@ -62,6 +62,10 @@ function migrate(d) {
   if (!d.notes) d.notes = [];
   if (!d.settings) d.settings = { theme: 'light', auth: { u: 'Frank', p: 'Stzj123', o: 0 } };
   if (d.settings.auth && !d.settings.auth.o) d.settings.auth = { u: obf(d.settings.auth.u), p: obf(d.settings.auth.p), o: 1 };
+  (d.goals || []).forEach(g => {
+    if (!Array.isArray(g.details)) g.details = [];
+    if (typeof g.solution !== 'string') g.solution = '';
+  });
   return d;
 }
 
@@ -365,7 +369,7 @@ function renderAnalysis() {
 function renderGoals() {
   const colors = ['#ef4444', '#f59e0b', '#4f6ef2', '#0ea5a4', '#7c5cf0'];
   return `
-  <div class="page-head"><h2>🎯 目标与问题清单</h2><p>点击星星赋予重要性（★ 越多越重要），子项可勾选推进</p>
+  <div class="page-head"><h2>🎯 目标与问题清单</h2><p>点击星星赋予重要性（★ 越多越重要），子项可勾选推进，「解决方案」里记录应对措施</p>
     <div class="head-ops"><button class="btn btn-primary btn-sm" data-act="add-goal">➕ 新增目标</button></div></div>
   ${S.goals.map(g => {
     const dt = (g.details || []).length, dd = (g.details || []).filter(x => x.done).length;
@@ -389,6 +393,10 @@ function renderGoals() {
         </div>`).join('')}
       <div style="padding:2px 4px 0 30px"><input class="add-input" data-add-detail="${g.id}" placeholder="＋ 添加子目标，回车确认"></div>
       ${dt ? `<div class="progress-wrap"><div class="progress-bar"><div class="fill" style="width:${pct}%"></div></div><span class="pt">${dd}/${dt} · ${pct}%</span></div>` : ''}
+      <div class="solution-wrap">
+        <div class="solution-head">💡 解决方案与措施 <span class="hint">记录打算如何解决：具体措施、方法步骤、时间节奏、检验标准（自动保存）</span></div>
+        <textarea class="autosize solution-text" rows="2" data-field="goalSolution" data-id="${g.id}" placeholder="针对「${esc(g.title.slice(0, 18))}${g.title.length > 18 ? '…' : ''}」，打算怎么做…">${esc(g.solution || '')}</textarea>
+      </div>
     </div>`;
   }).join('')}`;
 }
@@ -802,7 +810,7 @@ function onClick(e) {
     case 'add-ana-item': { const g = findAnaGroup(id); if (g) { g.items.push({ id: uid(), text: '' }); save(); render(); } break; }
     case 'del-ana-item': S.analysis.forEach(s => s.groups.forEach(g => g.items = g.items.filter(i => i.id !== id))); save(); render(); break;
     /* 目标 */
-    case 'add-goal': S.goals.push({ id: uid(), title: '新目标', stars: 3, done: false, details: [] }); save(); render(); break;
+    case 'add-goal': S.goals.push({ id: uid(), title: '新目标', stars: 3, done: false, details: [], solution: '' }); save(); render(); break;
     case 'del-goal': if (confirm('确定删除该目标？')) { S.goals = S.goals.filter(g => g.id !== id); save(); render(); } break;
     case 'up-goal': moveInArr(S.goals, id, -1); save(); render(); break;
     case 'down-goal': moveInArr(S.goals, id, 1); save(); render(); break;
@@ -937,6 +945,7 @@ function onInput(e) {
     case 'anaGroupTitle': { const g = findAnaGroup(id); if (g) g.title = v; break; }
     case 'anaText': { const a = findAnaItem(id); if (a) a.item.text = v; break; }
     case 'goalTitle': { const g = findGoal(id); if (g) g.title = v; break; }
+    case 'goalSolution': { const g = findGoal(id); if (g) g.solution = v; break; }
     case 'detailText': { const d = findItem(id); if (d && d.item) d.item.text = v; break; }
     case 'itemText': { const x = findItem(id); if (x && x.item) x.item.text = v; break; }
     case 'itemSummary': { const x = findItem(id); if (x && x.item) x.item.summary = v; break; }
