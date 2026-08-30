@@ -20,11 +20,11 @@ CREDS=$(printf "protocol=https\nhost=github.com\n" | git credential fill)
 TOKEN=$(echo "$CREDS" | grep '^password=' | cut -d= -f2-)
 if [ -z "$TOKEN" ]; then echo "未获取到凭据，请重试"; exit 1; fi
 
-echo "==> 2/4 创建仓库 $USER_NAME/$REPO（若已存在则跳过）"
+echo "==> 2/4 创建私人仓库 $USER_NAME/$REPO（若已存在则跳过）"
 curl -s -o /dev/null -X POST \
   -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
   https://api.github.com/user/repos \
-  -d "{\"name\":\"$REPO\",\"private\":false,\"description\":\"个人计划执行总结工作台\"}"
+  -d "{\"name\":\"$REPO\",\"private\":true,\"description\":\"个人计划执行总结工作台\"}"
 
 echo "==> 3/4 推送代码"
 git config user.name  >/dev/null 2>&1 || git config user.name  "$USER_NAME"
