@@ -38,6 +38,8 @@ curl -s -X POST \
   -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
   "https://api.github.com/repos/$USER_NAME/$REPO/pages" \
   -d '{"source":{"branch":"main","path":"/"}}' | grep -E '"html_url"|"message"' | head -2
+echo "注：GitHub 免费计划不支持为私人仓库开启 Pages；"
+echo "    若上一步报 plan 相关错误，可升级 GitHub Pro，或将仓库改为公开后再开启 Pages。"
 
 echo ""
 echo "✅ 完成！约 1-2 分钟后访问："

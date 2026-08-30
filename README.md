@@ -49,6 +49,8 @@ git push -u origin main
 
 之后即可通过 `https://<你的用户名>.github.io/personal-workbench/` 访问。
 
+> **私人仓库注意**：GitHub 免费计划不支持为私人仓库开启 Pages（升级 Pro 可用）。私人仓库仅作代码备份时，本地直接双击 `index.html` 或运行静态服务器即可使用本应用；若希望获得在线网址且保持免费，需将仓库设为 Public。
+
 ## 数据与安全说明
 
 - 所有内容仅存储在当前浏览器的 localStorage 中：**换浏览器 / 换电脑 / 清理缓存前，请先在「工具箱」导出备份**。
