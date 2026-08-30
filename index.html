@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>个人计划执行工作台</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ============ 登录层 ============ -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="login-logo">📋</div>
+    <h1>个人计划执行工作台</h1>
+    <p class="login-sub">Plan · Execute · Review</p>
+    <form id="login-form" autocomplete="off">
+      <label for="login-user">账号</label>
+      <input id="login-user" autocomplete="username" placeholder="请输入账号">
+      <label for="login-pass">密码</label>
+      <input id="login-pass" type="password" autocomplete="current-password" placeholder="请输入密码">
+      <label class="remember"><input type="checkbox" id="login-remember"> 记住我（本机免登录）</label>
+      <div id="login-err" class="login-err"></div>
+      <button class="btn btn-primary btn-block" type="submit">登 录</button>
+    </form>
+    <p class="login-tip">数据保存在本机浏览器中，可在「工具箱」页导出备份</p>
+  </div>
+</div>
+
+<!-- ============ 应用主体 ============ -->
+<div id="app" class="hidden">
+  <aside id="sidebar">
+    <div class="side-brand">
+      <span class="logo">📋</span>
+      <div><b>个人工作台</b><i>计划 · 执行 · 复盘</i></div>
+    </div>
+    <nav id="nav"></nav>
+    <div class="side-bottom">
+      <div class="side-search">
+        <input id="global-search" placeholder="🔍 搜索全部内容…">
+        <div id="search-result" class="hidden"></div>
+      </div>
+      <div class="side-btns">
+        <button class="side-btn" id="theme-btn" data-act="toggle-theme" title="深色 / 浅色模式">🌙</button>
+        <button class="side-btn" data-act="logout" title="退出登录">⎋</button>
+      </div>
+    </div>
+  </aside>
+
+  <div id="main">
+    <header id="topbar">
+      <div id="route-title">总览</div>
+      <div class="top-actions">
+        <span id="clock"></span>
+        <button class="top-btn" data-act="quick-note" title="随时随地记一条">✏️ 随记</button>
+        <button class="top-btn" id="timer-mini" data-act="open-timer" title="番茄钟">⏱️ 25:00</button>
+      </div>
+    </header>
+    <main id="view"></main>
+  </div>
+</div>
+
+<!-- ============ 番茄钟浮窗 ============ -->
+<div id="timer-panel" class="hidden">
+  <div class="timer-head"><b>⏱️ 番茄钟</b><button class="icon-btn" data-act="close-timer">✕</button></div>
+  <div id="timer-display">25:00</div>
+  <div class="timer-modes">
+    <button data-act="timer-mode" data-min="25" class="active">专注25</button>
+    <button data-act="timer-mode" data-min="45">深度45</button>
+    <button data-act="timer-mode" data-min="5">休息5</button>
+  </div>
+  <div class="timer-btns">
+    <button class="btn btn-primary" data-act="timer-start">开始</button>
+    <button class="btn" data-act="timer-pause">暂停</button>
+    <button class="btn" data-act="timer-reset">重置</button>
+  </div>
+</div>
+
+<div id="modal-root" class="hidden"></div>
+<div id="toast"></div>
+
+<script src="js/seed.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
