@@ -6,9 +6,7 @@
 const SEED = {
   version: 1,
   settings: {
-    theme: 'light',
-    /* o=0 表示尚未混淆，首次加载时会转为混淆存储 */
-    auth: { u: 'Frank', p: 'Stzj123', o: 0 }
+    theme: 'light'
   },
 
   /* ---------- 二、形势分析 ---------- */

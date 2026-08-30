@@ -7,6 +7,12 @@
 const STORE_KEY = 'pwb_data_v1';
 const REMEMBER_KEY = 'pwb_remember';
 const SESSION_KEY = 'pwb_session';
+const TOKEN_KEY = 'pwb_token';          /* GitHub 访问令牌（仅存本机浏览器） */
+const OWNER_KEY = 'pwb_owner';          /* GitHub 用户名 */
+const AUTHCACHE_KEY = 'pwb_authcache';  /* 登录凭据缓存 {u,salt,hash} */
+const DATA_REPO = 'personal-workbench-data'; /* 私人数据仓库 */
+const AUTH_PATH = 'auth.json';
+const DATA_PATH = 'data.json';
 
 const NAV = [
   { id: 'dashboard', icon: '📊', label: '总览' },
@@ -28,10 +34,12 @@ const BLOCK_LBL = { work: '工作', noon: '中午', evening: '晚上', day: '全
 
 /* ---------- 状态 ---------- */
 let S = null;
+const GH = { token: '', owner: '' };
 const U = {
   route: 'dashboard', todoTab: 'work', dailyDate: '',
   noteFilter: '', noteSearch: '', searchResults: [],
-  openSummaries: new Set(), reportStart: ''
+  openSummaries: new Set(), reportStart: '',
+  loginMode: 'token', hadLocalData: false
 };
 
 /* ---------- 持久化 ---------- */
@@ -60,8 +68,7 @@ function firstRunData() {
 function migrate(d) {
   if (!d.plans) d.plans = {};
   if (!d.notes) d.notes = [];
-  if (!d.settings) d.settings = { theme: 'light', auth: { u: 'Frank', p: 'Stzj123', o: 0 } };
-  if (d.settings.auth && !d.settings.auth.o) d.settings.auth = { u: obf(d.settings.auth.u), p: obf(d.settings.auth.p), o: 1 };
+  if (!d.settings) d.settings = { theme: 'light' };
   (d.goals || []).forEach(g => {
     if (!Array.isArray(g.details)) g.details = [];
     if (typeof g.solution !== 'string') g.solution = '';
@@ -69,9 +76,198 @@ function migrate(d) {
   return d;
 }
 
-/* ---------- 登录（纯前端门禁） ---------- */
+/* =========================================================
+   GitHub 云同步（数据存放在名下私人仓库 personal-workbench-data）
+   ========================================================= */
+async function ghApi(method, path, body) {
+  /* 加唯一参数绕过中间层缓存（缓存按 URL 键存取会串掉不同 Accept 的响应） */
+  const url = 'https://api.github.com' + path + (path.includes('?') ? '&' : '?') + '_t=' + Date.now();
+  const res = await fetch(url, {
+    method,
+    headers: { 'Authorization': 'Bearer ' + GH.token, 'Accept': 'application/vnd.github+json' },
+    cache: 'no-store',
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if (!res.ok) {
+    const err = new Error('GitHub API ' + res.status + ' ' + (await res.text().catch(() => '')).slice(0, 120));
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+async function ghGetFile(path) {
+  /* 默认 JSON 响应取元数据并自行 base64 解码，行为最确定 */
+  const meta = await ghApi('GET', `/repos/${GH.owner}/${DATA_REPO}/contents/${path}?ref=main`);
+  if (meta && meta.content && meta.encoding === 'base64') return b64decode(meta.content.replace(/\s/g, ''));
+  return meta;
+}
+async function ghPutFile(path, text, msg) {
+  let sha = null;
+  try { sha = (await ghApi('GET', `/repos/${GH.owner}/${DATA_REPO}/contents/${path}?ref=main`)).sha; }
+  catch (e) { if (e.status !== 404) throw e; }
+  return ghApi('PUT', `/repos/${GH.owner}/${DATA_REPO}/contents/${path}`, { message: msg, content: b64encode(text), sha: sha || undefined });
+}
+async function ghEnsureRepo() {
+  try { await ghApi('GET', `/repos/${GH.owner}/${DATA_REPO}`); return; }
+  catch (e) {
+    if (e.status !== 404) throw e;
+    try { await ghApi('POST', '/user/repos', { name: DATA_REPO, private: true, description: '工作台私人数据仓库（由工作台自动创建）' }); }
+    catch (e2) {
+      if (e2.status === 422) return; /* 已存在 */
+      throw new Error('无法自动创建数据仓库（HTTP ' + e2.status + '），请手动创建私人仓库 ' + DATA_REPO + ' 或改用经典令牌（repo 权限）');
+    }
+  }
+}
+async function verifyToken(token) {
+  const res = await fetch('https://api.github.com/user', { headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' } });
+  if (!res.ok) throw new Error('令牌无效（HTTP ' + res.status + '）');
+  return (await res.json()).login;
+}
+async function cloudPush(silent) {
+  await ghEnsureRepo();
+  await ghPutFile(DATA_PATH, JSON.stringify(S, null, 2), '工作台数据备份 ' + nowIso());
+  S.syncedAt = nowIso();
+  save();
+  if (!silent) { render(); toast('☁️ 已推送到 GitHub（' + DATA_REPO + '）'); }
+}
+async function cloudPull(opts) {
+  const silent = opts && opts.silent;
+  const text = await ghGetFile(DATA_PATH);
+  const data = migrate(JSON.parse(text));
+  if (!data.todos || !data.analysis) throw new Error('云端数据格式不正确');
+  if (!silent && !confirm('将用云端数据覆盖本机当前数据，确定？')) return false;
+  S = data;
+  save(); applyTheme(S.settings.theme || 'light'); render();
+  if (!silent) toast('☁️ 已从 GitHub 恢复数据');
+  return true;
+}
+
+/* ---------- 登录（访问令牌 + 云端加盐哈希口令，双重门禁） ---------- */
 function isAuthed() { return localStorage.getItem(REMEMBER_KEY) === '1' || sessionStorage.getItem(SESSION_KEY) === '1'; }
-function showLogin() { el('login-screen').classList.remove('hidden'); el('app').classList.add('hidden'); }
+function authUser() {
+  try { return (JSON.parse(localStorage.getItem(AUTHCACHE_KEY) || 'null') || {}).u || ''; } catch (e) { return ''; }
+}
+function renderLoginMode(cfg, errMsg) {
+  el('login-screen').classList.remove('hidden');
+  el('app').classList.add('hidden');
+  let html = '';
+  if (U.loginMode === 'token') {
+    html = `
+      <p class="login-mode-desc">本设备首次使用：请粘贴 GitHub <b>访问令牌（PAT）</b>。令牌仅保存在本机浏览器，用于读写你名下的私人数据仓库 <b>${DATA_REPO}</b>，其他人无法获取。</p>
+      <form id="login-form">
+        <label>GitHub 访问令牌</label>
+        <input id="li-token" type="password" placeholder="粘贴 ghp_… / github_pat_…" autocomplete="off">
+        <div id="login-err" class="login-err">${esc(errMsg || '')}</div>
+        <button class="btn btn-primary btn-block" type="submit">验证并继续</button>
+      </form>
+      <details class="login-help"><summary>如何创建访问令牌？</summary>
+        <p>登录 GitHub → 头像 → <b>Settings → Developer settings → Personal access tokens</b>：<br>· <b>经典令牌</b>：勾选 <b>repo</b> 权限（推荐，最省事）<br>· Fine-grained 令牌：授权仓库 <b>${DATA_REPO}</b>，权限 <b>Contents: Read and write</b><br>生成后复制粘贴到上方输入框，可随时在 GitHub 设置中吊销。</p>
+      </details>`;
+  } else if (U.loginMode === 'init') {
+    html = `
+      <p class="login-mode-desc">✅ 令牌验证成功。首次使用，请设置登录账号与密码——将以<b>加盐 SHA-256 哈希</b>保存到你名下的私人数据仓库，公开的网站代码中不含任何密码。</p>
+      <form id="login-form">
+        <label>登录账号</label>
+        <input id="li-user" value="${esc((cfg && cfg.u) || 'Frank')}" autocomplete="username">
+        <label>新密码（至少 6 位）</label>
+        <input id="li-pass" type="password" autocomplete="new-password">
+        <label>确认新密码</label>
+        <input id="li-pass2" type="password" autocomplete="new-password">
+        <div id="login-err" class="login-err">${esc(errMsg || '')}</div>
+        <button class="btn btn-primary btn-block" type="submit">完成初始化</button>
+      </form>
+      <p class="login-help-p">初始化会把本机当前的工作台数据上传，作为云端初始数据。</p>`;
+  } else {
+    html = `
+      <form id="login-form">
+        <label>账号</label>
+        <input id="li-user" value="${esc((cfg && cfg.u) || '')}" autocomplete="username">
+        <label>密码</label>
+        <input id="li-pass" type="password" autocomplete="current-password">
+        <label class="remember"><input type="checkbox" id="li-remember"> 记住我（本机免登录）</label>
+        <div id="login-err" class="login-err">${esc(errMsg || '')}</div>
+        <button class="btn btn-primary btn-block" type="submit">登 录</button>
+      </form>
+      <div class="login-links">
+        <button class="linklike" data-act="login-reinit">忘记密码？重新初始化</button>
+        <button class="linklike" data-act="login-retoken">更换访问令牌</button>
+      </div>`;
+  }
+  el('login-body').innerHTML = html;
+}
+function loginErr(msg) {
+  const e = el('login-err');
+  if (e) e.textContent = msg;
+  const c = document.querySelector('.login-card');
+  if (c) { c.classList.remove('shake'); void c.offsetWidth; c.classList.add('shake'); }
+}
+async function submitToken(token) {
+  if (!token) throw new Error('请输入访问令牌');
+  const owner = await verifyToken(token);
+  GH.token = token; GH.owner = owner;
+  localStorage.setItem(TOKEN_KEY, token);
+  localStorage.setItem(OWNER_KEY, owner);
+  try {
+    const cfg = JSON.parse(await ghGetFile(AUTH_PATH));
+    localStorage.setItem(AUTHCACHE_KEY, JSON.stringify(cfg));
+    U.loginMode = 'login'; renderLoginMode(cfg);
+  } catch (e) {
+    if (e.status === 404) { U.loginMode = 'init'; renderLoginMode(); }
+    else throw new Error('无法读取数据仓库（HTTP ' + (e.status || '') + '）：请确认令牌已授权 ' + DATA_REPO);
+  }
+}
+async function submitInit(u, p1, p2) {
+  if (!u) throw new Error('请填写登录账号');
+  if ((p1 || '').length < 6) throw new Error('密码至少 6 位');
+  if (p1 !== p2) throw new Error('两次输入的密码不一致');
+  await ghEnsureRepo();
+  const salt = randSalt();
+  const cfg = { u, salt, hash: await sha256Hex(salt + ':' + p1), createdAt: nowIso() };
+  await ghPutFile(AUTH_PATH, JSON.stringify(cfg, null, 2), '初始化登录凭据');
+  localStorage.setItem(AUTHCACHE_KEY, JSON.stringify(cfg));
+  try { await cloudPush(true); } catch (e) { /* 数据上传失败不阻塞进入 */ }
+  sessionStorage.setItem(SESSION_KEY, '1');
+  U.hadLocalData = true;
+  enterApp();
+  toast('🎉 初始化完成，数据已备份到私人仓库');
+}
+async function doLogin(u, p, remember) {
+  const cfg = JSON.parse(localStorage.getItem(AUTHCACHE_KEY) || 'null');
+  if (!cfg || !cfg.hash) throw new Error('本机缺少凭据缓存，请点击「更换访问令牌」重新验证');
+  if (u !== cfg.u || (await sha256Hex(cfg.salt + ':' + (p || ''))) !== cfg.hash) throw new Error('账号或密码不正确');
+  if (remember) localStorage.setItem(REMEMBER_KEY, '1');
+  sessionStorage.setItem(SESSION_KEY, '1');
+  enterApp();
+  if (!U.hadLocalData) {
+    try { if (await cloudPull({ silent: true })) toast('☁️ 已自动从云端恢复数据'); } catch (e) { /* 云端暂无数据则忽略 */ }
+  }
+}
+async function bootAuth() {
+  GH.token = localStorage.getItem(TOKEN_KEY) || '';
+  GH.owner = localStorage.getItem(OWNER_KEY) || '';
+  if (isAuthed()) { enterApp(); return; }
+  if (GH.token) {
+    const cache = localStorage.getItem(AUTHCACHE_KEY);
+    if (cache) {
+      try {
+        const cfg = JSON.parse(cache);
+        U.loginMode = 'login'; renderLoginMode(cfg);
+        return;
+      } catch (e) {}
+    }
+    try {
+      const cfg = JSON.parse(await ghGetFile(AUTH_PATH));
+      localStorage.setItem(AUTHCACHE_KEY, JSON.stringify(cfg));
+      U.loginMode = 'login'; renderLoginMode(cfg);
+    } catch (e) {
+      if (e.status === 404) { U.loginMode = 'init'; renderLoginMode(); }
+      else { localStorage.removeItem(TOKEN_KEY); U.loginMode = 'token'; renderLoginMode(null, '令牌无效或未授权数据仓库（HTTP ' + (e.status || '') + '），请重新粘贴'); }
+    }
+    return;
+  }
+  U.loginMode = 'token';
+  renderLoginMode();
+}
 function enterApp() {
   el('login-screen').classList.add('hidden');
   el('app').classList.remove('hidden');
@@ -276,7 +472,7 @@ function renderDashboard() {
   });
   return `
   <div class="banner">
-    <div><div class="hi">${greet}，${esc(deobf(S.settings.auth.u) || '朋友')} 👋</div>
+    <div><div class="hi">${greet}，${esc(authUser() || '朋友')} 👋</div>
     <div class="date">${fmtCNDate(tk)} · ${isWeekendKey(tk) ? '周末' : '工作日'}</div></div>
     <div class="quote">“${quote}”</div>
   </div>
@@ -593,6 +789,17 @@ function renderTools() {
   <div class="page-head"><h2>🧰 工具箱</h2><p>数据备份、周报生成、密码管理等实用功能</p></div>
   <div class="tool-grid">
     <div class="card">
+      <h3>☁️ GitHub 云同步 <span class="hint">${GH.token ? '令牌已配置 ✓' : '未配置令牌'}</span></h3>
+      <p style="font-size:12.5px;color:var(--muted)">数据仓库：<b>${esc(GH.owner || '?')}/${DATA_REPO}</b>（私人，公开代码中不含数据）${S.syncedAt ? '<br>上次同步：' + esc(S.syncedAt) : ''}<br>「推送」把本机全部数据提交到私人仓库；「恢复」用云端数据覆盖本机。换设备登录后点一次恢复即可接续进度。</p>
+      <div class="tool-row">
+        <button class="btn btn-primary btn-sm" data-act="cloud-push">⬆ 推送到 GitHub</button>
+        <button class="btn btn-sm" data-act="cloud-pull">⬇ 从 GitHub 恢复</button>
+      </div>
+      <div class="danger-zone">
+        <button class="btn btn-sm" data-act="forget-token">🔑 移除本机访问令牌（退出云同步）</button>
+      </div>
+    </div>
+    <div class="card">
       <h3>💾 数据管理 <span class="hint">本地占用 ${kb} KB</span></h3>
       <p style="font-size:12.5px;color:var(--muted)">当前 ${countItems()} 条事项 · ${Object.keys(S.plans).length} 天计划 · ${S.notes.length} 条随记。数据仅保存在本机浏览器（localStorage），换设备或清理浏览器前请先导出备份。</p>
       <div class="tool-row">
@@ -635,6 +842,7 @@ function renderTools() {
         <b>随记总结</b>：像便笺一样随手记，自动提取关键词；顶栏「✏️ 随记」任何页面都能快速记一条<br>
         <b>番茄钟</b>：顶栏 ⏱ 打开，专注 25 / 深度 45 / 休息 5 三种模式，结束有提示音<br>
         <b>周报</b>：按 周六→周五 汇总一周完成情况，一键复制或下载<br>
+        <b>云同步</b>：数据存到你名下的私人仓库 ${DATA_REPO}，公开代码中无任何数据；工具箱可推送 / 恢复，新设备凭令牌登录自动接续<br>
         <b>外观</b>：侧栏底部 🌙 可切换深色模式；手机浏览器访问自动切换为窄屏布局<br>
         <b>快捷键</b>：<span class="kbd">Ctrl</span>+<span class="kbd">Enter</span> 保存随记 · <span class="kbd">Esc</span> 关闭弹窗 · 输入框中 <span class="kbd">Enter</span> 快速添加
       </div>
@@ -659,16 +867,23 @@ function doImportFile(file) {
   };
   rd.readAsText(file, 'utf-8');
 }
-function changePass() {
-  const cur = el('pass-cur').value, n1 = el('pass-new').value, n2 = el('pass-new2').value;
-  const a = S.settings.auth;
-  if (obf(cur) !== a.p) { toast('当前密码不正确'); return; }
-  if (n1.length < 6) { toast('新密码至少 6 位'); return; }
-  if (n1 !== n2) { toast('两次输入的新密码不一致'); return; }
-  S.settings.auth = { u: a.u, p: obf(n1), o: 1 };
-  save();
-  el('pass-cur').value = el('pass-new').value = el('pass-new2').value = '';
-  toast('密码已修改，下次登录生效');
+async function changePass() {
+  try {
+    const cur = el('pass-cur').value, n1 = el('pass-new').value, n2 = el('pass-new2').value;
+    const cfg = JSON.parse(localStorage.getItem(AUTHCACHE_KEY) || 'null');
+    if (!cfg || !cfg.hash) { toast('本机缺少凭据缓存，无法修改密码'); return; }
+    if ((await sha256Hex(cfg.salt + ':' + cur)) !== cfg.hash) { toast('当前密码不正确'); return; }
+    if (n1.length < 6) { toast('新密码至少 6 位'); return; }
+    if (n1 !== n2) { toast('两次输入的新密码不一致'); return; }
+    const salt = randSalt();
+    const ncfg = { u: cfg.u, salt, hash: await sha256Hex(salt + ':' + n1), updatedAt: nowIso() };
+    await ghPutFile(AUTH_PATH, JSON.stringify(ncfg, null, 2), '修改登录密码');
+    localStorage.setItem(AUTHCACHE_KEY, JSON.stringify(ncfg));
+    el('pass-cur').value = el('pass-new').value = el('pass-new2').value = '';
+    toast('🔑 密码已修改并同步到云端');
+  } catch (e) {
+    toast('修改失败：' + e.message);
+  }
 }
 
 /* =========================================================
@@ -836,6 +1051,25 @@ function onClick(e) {
     case 'import-data': el('import-file').click(); break;
     case 'reset-data': if (confirm('将清空当前全部数据并恢复为初始内容，确定？')) { S = firstRunData(); save(); applyTheme(S.settings.theme || 'light'); render(); toast('已恢复初始数据'); } break;
     case 'change-pass': changePass(); break;
+    /* 云同步与登录辅助 */
+    case 'cloud-push': cloudPush().catch(e => toast('推送失败：' + e.message)); break;
+    case 'cloud-pull': cloudPull().catch(e => toast('恢复失败：' + e.message)); break;
+    case 'forget-token':
+      if (confirm('将移除本机保存的访问令牌与凭据缓存（云端数据不受影响），确定？')) {
+        localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(AUTHCACHE_KEY);
+        sessionStorage.removeItem(SESSION_KEY); localStorage.removeItem(REMEMBER_KEY);
+        location.reload();
+      }
+      break;
+    case 'login-reinit':
+      if (confirm('重新初始化将用新设置的账号密码覆盖云端凭据，继续？')) { U.loginMode = 'init'; renderLoginMode(); }
+      break;
+    case 'login-retoken':
+      if (confirm('更换令牌将清除本机保存的令牌与凭据缓存，需要重新粘贴，继续？')) {
+        localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(AUTHCACHE_KEY);
+        U.loginMode = 'token'; renderLoginMode();
+      }
+      break;
     case 'report-prev': U.reportStart = dateKey(addDays(dateFromKey(U.reportStart), -7)); render(); break;
     case 'report-next': U.reportStart = dateKey(addDays(dateFromKey(U.reportStart), 7)); render(); break;
     case 'copy-report': copyText(el('report-text').value, '周报已复制'); break;
@@ -1037,27 +1271,29 @@ function bindEvents() {
     if (ROUTES[r] && r !== U.route) { U.route = r; render(); }
   });
   window.addEventListener('beforeunload', () => { clearTimeout(save._t); save(); });
-  el('login-form').addEventListener('submit', e => {
+  document.addEventListener('submit', async e => {
+    if (e.target.id !== 'login-form') return;
     e.preventDefault();
-    const u = el('login-user').value.trim(), p = el('login-pass').value;
-    const a = S.settings.auth;
-    if (obf(u) === a.u && obf(p) === a.p) {
-      el('login-err').textContent = '';
-      if (el('login-remember').checked) localStorage.setItem(REMEMBER_KEY, '1');
-      sessionStorage.setItem(SESSION_KEY, '1');
-      enterApp();
-    } else {
-      el('login-err').textContent = '账号或密码不正确';
-      const c = document.querySelector('.login-card');
-      c.classList.remove('shake'); void c.offsetWidth; c.classList.add('shake');
+    const btn = e.target.querySelector('button[type=submit]');
+    const orig = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '处理中…'; }
+    try {
+      if (U.loginMode === 'token') await submitToken(el('li-token').value.trim());
+      else if (U.loginMode === 'init') await submitInit(el('li-user').value.trim(), el('li-pass').value, el('li-pass2').value);
+      else await doLogin(el('li-user').value.trim(), el('li-pass').value, el('li-remember') && el('li-remember').checked);
+    } catch (err) {
+      loginErr(err.message || '操作失败，请重试');
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = orig; }
     }
   });
 }
 function boot() {
   S = load();
+  U.hadLocalData = !!localStorage.getItem(STORE_KEY);
   applyTheme(S.settings.theme || 'light');
   bindEvents();
-  if (isAuthed()) enterApp(); else showLogin();
+  bootAuth();
 }
 document.addEventListener('DOMContentLoaded', boot);
 

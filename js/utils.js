@@ -3,22 +3,30 @@
    ========================================================= */
 'use strict';
 
-/* ---------- 凭据混淆（纯前端门禁，防直接明文查看，非加密） ---------- */
-const OBF_KEY = 'Pwb2026!Workbench';
-function obf(str) {
-  const s = unescape(encodeURIComponent(String(str)));
-  let o = '';
-  for (let i = 0; i < s.length; i++) o += String.fromCharCode(s.charCodeAt(i) ^ OBF_KEY.charCodeAt(i % OBF_KEY.length));
-  return btoa(o);
+/* ---------- 密码哈希与编码工具 ---------- */
+/* SHA-256（安全上下文）；file:// 等非安全上下文退化为非加密散列 */
+async function sha256Hex(text) {
+  if (typeof crypto !== "undefined" && crypto.subtle) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 2654435761); h2 = Math.imul(h2 ^ c, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
 }
-function deobf(b64) {
-  try {
-    const s = atob(b64);
-    let o = '';
-    for (let i = 0; i < s.length; i++) o += String.fromCharCode(s.charCodeAt(i) ^ OBF_KEY.charCodeAt(i % OBF_KEY.length));
-    return decodeURIComponent(escape(o));
-  } catch (e) { return ''; }
+function randSalt() {
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    return Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
+function b64encode(str) { return btoa(unescape(encodeURIComponent(str))); }
+function b64decode(b64) { return decodeURIComponent(escape(atob(b64))); }
 
 /* ---------- 基础 ---------- */
 function el(id) { return document.getElementById(id); }
