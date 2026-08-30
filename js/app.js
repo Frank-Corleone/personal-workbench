@@ -34,6 +34,7 @@ const BLOCK_LBL = { work: '工作', noon: '中午', evening: '晚上', day: '全
 
 /* ---------- 状态 ---------- */
 let S = null;
+let INSTALL_EVT = null; /* PWA 安装事件 */
 const GH = { token: '', owner: '' };
 const U = {
   route: 'dashboard', todoTab: 'work', dailyDate: '',
@@ -805,8 +806,10 @@ function renderTools() {
       <div class="tool-row">
         <button class="btn btn-primary btn-sm" data-act="export-data">⬇ 导出备份</button>
         <button class="btn btn-sm" data-act="import-data">⬆ 导入备份</button>
+        <button class="btn btn-sm" data-act="pwa-install" ${INSTALL_EVT ? '' : 'style="display:none"'}>📲 安装到桌面</button>
         <input type="file" id="import-file" accept=".json,application/json" style="display:none">
       </div>
+      <p style="font-size:11.5px;color:var(--faint);margin-top:8px">手机上：用 Chrome 打开本站 → 菜单 → 「安装应用 / 添加到主屏幕」，即可像 App 一样全屏使用（支持离线打开，数据照常云同步）。</p>
       <div class="danger-zone">
         <button class="btn btn-danger btn-sm" data-act="reset-data">↺ 恢复初始数据（清空当前全部内容）</button>
       </div>
@@ -1051,6 +1054,10 @@ function onClick(e) {
     case 'import-data': el('import-file').click(); break;
     case 'reset-data': if (confirm('将清空当前全部数据并恢复为初始内容，确定？')) { S = firstRunData(); save(); applyTheme(S.settings.theme || 'light'); render(); toast('已恢复初始数据'); } break;
     case 'change-pass': changePass(); break;
+    case 'pwa-install':
+      if (INSTALL_EVT) { INSTALL_EVT.prompt(); INSTALL_EVT = null; render(); }
+      else toast('当前浏览器不支持一键安装，请用浏览器菜单中的「添加到主屏幕」');
+      break;
     /* 云同步与登录辅助 */
     case 'cloud-push': cloudPush().catch(e => toast('推送失败：' + e.message)); break;
     case 'cloud-pull': cloudPull().catch(e => toast('恢复失败：' + e.message)); break;
@@ -1293,6 +1300,11 @@ function boot() {
   U.hadLocalData = !!localStorage.getItem(STORE_KEY);
   applyTheme(S.settings.theme || 'light');
   bindEvents();
+  window.addEventListener('beforeinstallprompt', e => {
+    e.preventDefault();
+    INSTALL_EVT = e;
+    if (U.route === 'tools') render();
+  });
   bootAuth();
 }
 document.addEventListener('DOMContentLoaded', boot);

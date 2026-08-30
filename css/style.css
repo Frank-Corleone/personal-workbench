@@ -123,7 +123,7 @@ input,textarea,select{font-family:inherit;color:var(--txt)}
   padding:6px 12px;font-size:12.5px;font-variant-numeric:tabular-nums;
 }
 .top-btn:hover{border-color:var(--primary);color:var(--primary)}
-#view{flex:1;overflow-y:auto;padding:20px 22px 70px;scroll-behavior:smooth}
+#view{flex:1;overflow-y:auto;padding:20px 22px calc(70px + env(safe-area-inset-bottom));scroll-behavior:smooth}
 
 /* ---------------- 通用组件 ---------------- */
 .page-head{margin-bottom:16px}
