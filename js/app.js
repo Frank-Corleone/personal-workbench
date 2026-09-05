@@ -45,7 +45,7 @@ const U = {
   route: 'dashboard', todoTab: 'work', dailyDate: '',
   noteFilter: '', noteSearch: '', searchResults: [],
   openSummaries: new Set(), reportStart: '',
-  loginMode: 'token', hadLocalData: false
+  loginMode: 'token', hadLocalData: false, goalId: null
 };
 
 /* ---------- 持久化 ---------- */
@@ -344,8 +344,7 @@ async function bootAuth() {
 function enterApp() {
   el('login-screen').classList.add('hidden');
   el('app').classList.remove('hidden');
-  const r = (location.hash || '').replace(/^#\//, '');
-  U.route = ROUTES[r] ? r : 'dashboard';
+  U.route = routeFromHash();
   U.reportStart = weekStartKey(new Date());
   if (!U.dailyDate) U.dailyDate = todayKey();
   render();
@@ -430,9 +429,15 @@ function render() {
   autosizeAll(view);
   view.scrollTop = st;
 }
+function routeFromHash() {
+  const h = (location.hash || '').replace(/^#\//, '');
+  if (h.startsWith('goal/')) { U.goalId = h.slice(5); return 'goal'; }
+  return ROUTES[h] ? h : 'dashboard';
+}
 function setRoute(r) {
   U.route = r;
-  if ('#/' + r !== location.hash) location.hash = '#/' + r;
+  const h = r === 'goal' ? '#/goal/' + (U.goalId || '') : '#/' + r;
+  if (h !== location.hash) location.hash = h;
   render();
   el('view').scrollTop = 0;
 }
@@ -599,7 +604,7 @@ function renderDashboard() {
       <div class="card-head"><h3>🎯 目标速览</h3><div class="ops"><button class="btn btn-sm" data-act="nav" data-route="goals">管理 ›</button></div></div>
       ${S.goals.map(g => {
         const dt = (g.details || []).length, dd = (g.details || []).filter(x => x.done).length;
-        return `<div class="goal-line"><span class="stars" style="flex:none">${[1, 2, 3, 4, 5].map(n => `<span class="star ${n <= g.stars ? 'on' : ''}">${n <= g.stars ? '★' : '☆'}</span>`).join('')}</span><span class="gt">${esc(g.title)}</span>${dt ? `<span class="pct">${dd}/${dt}</span>` : ''}</div>`;
+        return `<div class="goal-line" data-act="open-goal" data-id="${g.id}" style="cursor:pointer" title="点击进入详情编辑"><span class="stars" style="flex:none">${[1, 2, 3, 4, 5].map(n => `<span class="star ${n <= g.stars ? 'on' : ''}">${n <= g.stars ? '★' : '☆'}</span>`).join('')}</span><span class="gt">${esc(g.title)}</span>${dt ? `<span class="pct">${dd}/${dt}</span>` : ''}</div>`;
       }).join('')}
     </div>
     <div class="card">
@@ -650,36 +655,74 @@ function renderAnalysis() {
 function renderGoals() {
   const colors = ['#ef4444', '#f59e0b', '#4f6ef2', '#0ea5a4', '#7c5cf0'];
   return `
-  <div class="page-head"><h2>🎯 目标与问题清单</h2><p>点击星星赋予重要性（★ 越多越重要），子项可勾选推进，「解决方案」里记录应对措施</p>
+  <div class="page-head"><h2>🎯 目标与问题清单</h2><p>点击任意目标进入专属页面：编辑重要度、解决方案与措施、子目标推进</p>
     <div class="head-ops"><button class="btn btn-primary btn-sm" data-act="add-goal">➕ 新增目标</button></div></div>
   ${S.goals.map(g => {
     const dt = (g.details || []).length, dd = (g.details || []).filter(x => x.done).length;
     const pct = dt ? Math.round(dd / dt * 100) : null;
     return `
-    <div class="card goal-card" style="border-left-color:${colors[Math.max(Math.min(g.stars, 5) - 1, 0)] || 'var(--line)'}">
+    <div class="card goal-card goal-open" style="border-left-color:${colors[Math.max(Math.min(g.stars, 5) - 1, 0)] || 'var(--line)'}" data-act="open-goal" data-id="${g.id}" title="点击进入详情编辑">
       <div class="goal-head">
         <div class="goal-stars"><span class="slbl">重要度</span>${starWidget(g)}</div>
-        <textarea class="autosize goal-title" rows="1" data-field="goalTitle" data-id="${g.id}">${esc(g.title)}</textarea>
+        <div class="goal-title-p">${esc(g.title)}</div>
         <div class="item-ops" style="opacity:1">
           <button class="icon-btn" data-act="up-goal" data-id="${g.id}" title="上移">↑</button>
           <button class="icon-btn" data-act="down-goal" data-id="${g.id}" title="下移">↓</button>
           <button class="icon-btn danger" data-act="del-goal" data-id="${g.id}" title="删除">✕</button>
+          <button class="btn btn-sm" data-act="open-goal" data-id="${g.id}">进入 ›</button>
         </div>
       </div>
-      ${(g.details || []).map(d => `
-        <div class="detail-row ${d.done ? 'is-done' : ''}">
-          <input type="checkbox" class="chk" data-act="toggle-detail" data-id="${d.id}" ${d.done ? 'checked' : ''}>
-          <textarea class="autosize item-text" rows="1" data-field="detailText" data-id="${d.id}">${esc(d.text)}</textarea>
-          <button class="icon-btn danger" data-act="del-detail" data-id="${d.id}">✕</button>
-        </div>`).join('')}
-      <div style="padding:2px 4px 0 30px"><input class="add-input" data-add-detail="${g.id}" placeholder="＋ 添加子目标，回车确认"></div>
-      ${dt ? `<div class="progress-wrap"><div class="progress-bar"><div class="fill" style="width:${pct}%"></div></div><span class="pt">${dd}/${dt} · ${pct}%</span></div>` : ''}
-      <div class="solution-wrap">
-        <div class="solution-head">💡 解决方案与措施 <span class="hint">记录打算如何解决：具体措施、方法步骤、时间节奏、检验标准（自动保存）</span></div>
-        <textarea class="autosize solution-text" rows="2" data-field="goalSolution" data-id="${g.id}" placeholder="针对「${esc(g.title.slice(0, 18))}${g.title.length > 18 ? '…' : ''}」，打算怎么做…">${esc(g.solution || '')}</textarea>
-      </div>
+      ${dt ? `<div class="progress-wrap"><div class="progress-bar"><div class="fill" style="width:${pct}%"></div></div><span class="pt">${dd}/${dt} · ${pct}%</span></div>` : '<div class="goal-solution-hint">尚未拆解子目标，进入详情后可拆解并记录解决方案</div>'}
+      ${g.solution ? `<div class="solution-preview-line">💡 ${esc(g.solution.slice(0, 80))}${g.solution.length > 80 ? '…' : ''}</div>` : ''}
     </div>`;
   }).join('')}`;
+}
+
+function renderGoalDetail() {
+  const g = findGoal(U.goalId);
+  if (!g) {
+    return `
+    <div class="page-head"><h2>🎯 目标详情</h2></div>
+    <div class="card"><div class="empty">目标不存在或已被删除</div>
+    <div style="text-align:center;padding-bottom:10px"><button class="btn btn-primary btn-sm" data-act="nav" data-route="goals">返回列表</button></div></div>`;
+  }
+  const colors = ['#ef4444', '#f59e0b', '#4f6ef2', '#0ea5a4', '#7c5cf0'];
+  const dt = (g.details || []).length, dd = (g.details || []).filter(x => x.done).length;
+  const pct = dt ? Math.round(dd / dt * 100) : null;
+  return `
+  <div class="page-head" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <button class="btn btn-sm" data-act="nav" data-route="goals">← 返回列表</button>
+    <span class="badge b-dim">目标详情</span>
+  </div>
+  <div class="card goal-card" style="border-left-color:${colors[Math.max(Math.min(g.stars, 5) - 1, 0)] || 'var(--line)'}">
+    <div class="goal-head">
+      <div class="goal-stars"><span class="slbl">重要度</span>${starWidget(g)}</div>
+      <textarea class="autosize goal-title" rows="1" data-field="goalTitle" data-id="${g.id}" placeholder="目标 / 问题的标题">${esc(g.title)}</textarea>
+    </div>
+    ${dt ? `<div class="progress-wrap"><div class="progress-bar"><div class="fill" style="width:${pct}%"></div></div><span class="pt">${dd}/${dt} · ${pct}%</span></div>` : ''}
+  </div>
+  <div class="card">
+    <h3>💡 解决方案与措施 <span class="hint">打算如何解决：具体措施、方法步骤、时间节奏、检验标准（自动保存）</span></h3>
+    <textarea class="autosize solution-text" rows="8" data-field="goalSolution" data-id="${g.id}" placeholder="针对「${esc(g.title.slice(0, 18))}${g.title.length > 18 ? '…' : ''}」，打算怎么做……${'\n'}第一步……${'\n'}第二步……${'\n'}每周检查一次……">${esc(g.solution || '')}</textarea>
+  </div>
+  <div class="card">
+    <div class="card-head"><h3>✅ 子目标</h3><div class="ops"><span class="plan-count">${dt ? dd + '/' + dt + ' 完成' : '把目标拆成可执行的小步骤'}</span></div></div>
+    ${(g.details || []).map(d => `
+      <div class="detail-row ${d.done ? 'is-done' : ''}">
+        <input type="checkbox" class="chk" data-act="toggle-detail" data-id="${d.id}" ${d.done ? 'checked' : ''}>
+        <textarea class="autosize item-text" rows="1" data-field="detailText" data-id="${d.id}">${esc(d.text)}</textarea>
+        <button class="icon-btn danger" data-act="del-detail" data-id="${d.id}">✕</button>
+      </div>`).join('') || '<div class="empty">还没有子目标</div>'}
+    <div style="padding:2px 4px 0 30px"><input class="add-input" data-add-detail="${g.id}" placeholder="＋ 添加子目标，回车确认"></div>
+  </div>
+  <div class="card">
+    <h3>⚙️ 管理</h3>
+    <div class="tool-row">
+      <button class="btn btn-sm" data-act="up-goal" data-id="${g.id}">↑ 列表上移</button>
+      <button class="btn btn-sm" data-act="down-goal" data-id="${g.id}">↓ 列表下移</button>
+      <button class="btn btn-danger btn-sm" data-act="del-goal" data-id="${g.id}">🗑 删除该目标</button>
+    </div>
+  </div>`;
 }
 
 /* =========================================================
@@ -1121,8 +1164,19 @@ function onClick(e) {
     case 'add-ana-item': { const g = findAnaGroup(id); if (g) { g.items.push({ id: uid(), text: '' }); save(); render(); } break; }
     case 'del-ana-item': S.analysis.forEach(s => s.groups.forEach(g => g.items = g.items.filter(i => i.id !== id))); save(); render(); break;
     /* 目标 */
-    case 'add-goal': S.goals.push({ id: uid(), title: '新目标', stars: 3, done: false, details: [], solution: '' }); save(); render(); break;
-    case 'del-goal': if (confirm('确定删除该目标？')) { S.goals = S.goals.filter(g => g.id !== id); save(); render(); } break;
+    case 'open-goal': U.goalId = t.dataset.id; setRoute('goal'); break;
+    case 'add-goal': {
+      const ng = { id: uid(), title: '新目标', stars: 3, done: false, details: [], solution: '' };
+      S.goals.push(ng); save();
+      U.goalId = ng.id; setRoute('goal');
+      break;
+    }
+    case 'del-goal':
+      if (confirm('确定删除该目标？')) {
+        S.goals = S.goals.filter(g => g.id !== id); save();
+        if (U.route === 'goal') { U.goalId = null; setRoute('goals'); } else render();
+      }
+      break;
     case 'up-goal': moveInArr(S.goals, id, -1); save(); render(); break;
     case 'down-goal': moveInArr(S.goals, id, 1); save(); render(); break;
     case 'del-detail': { const f = findItem(id); if (f && f.goal) { f.goal.details = f.goal.details.filter(d => d.id !== id); save(); render(); } break; }
@@ -1375,8 +1429,8 @@ function bindEvents() {
   }, true);
   window.addEventListener('hashchange', () => {
     if (!isAuthed()) return;
-    const r = (location.hash || '').replace(/^#\//, '');
-    if (ROUTES[r] && r !== U.route) { U.route = r; render(); }
+    const r = routeFromHash();
+    if (r !== U.route) { U.route = r; render(); }
   });
   window.addEventListener('beforeunload', () => { clearTimeout(save._t); save(); if (DIRTY) autoPushNow(); });
   /* 自动同步：切回应用/窗口聚焦时检查云端更新；切到后台时冲刷未推送修改 */
@@ -1421,6 +1475,7 @@ Object.assign(ROUTES, {
   dashboard: renderDashboard,
   analysis: renderAnalysis,
   goals: renderGoals,
+  goal: renderGoalDetail,
   todos: renderTodos,
   daily: renderDaily,
   notes: renderNotes,

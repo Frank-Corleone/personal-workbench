@@ -279,6 +279,11 @@ details.done-fold summary:hover{color:var(--primary)}
 
 /* ---------------- 目标 ---------------- */
 .goal-card{border-left:4px solid var(--primary)}
+.goal-open{cursor:pointer;transition:transform .12s, box-shadow .12s}
+.goal-open:hover{transform:translateY(-2px);box-shadow:0 16px 34px -16px rgba(16,24,40,.3)}
+.goal-title-p{flex:1;font-weight:700;font-size:14.5px;padding:4px 8px;min-width:0;word-break:break-all}
+.goal-solution-hint{font-size:12px;color:var(--faint);padding:4px 8px 0}
+.solution-preview-line{font-size:12px;color:var(--muted);background:var(--card2);border-left:3px solid var(--primary);border-radius:0 8px 8px 0;padding:6px 10px;margin:10px 6px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .goal-head{display:flex;gap:12px;align-items:flex-start}
 .goal-title{border-color:transparent;background:transparent;font-weight:700;font-size:14.5px;flex:1;padding:4px 8px}
 .goal-title:hover{border-color:var(--line)}
